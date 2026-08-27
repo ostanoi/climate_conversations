@@ -1,0 +1,1131 @@
+---
+title: "Climate Change Conversations Study 3"
+author: "Ovidia Stanoi"
+date: "08/24/2026"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    theme: united
+    highlight: tango
+    df_print: paged
+    toc_float: true
+    css: styles.css
+    tabset: true
+  pdf_document: default
+---
+
+<br>
+
+Study 3 examined how real-life conversation experiences related to willingness to talk more about climate change in the future. In a 10-day longitudinal study, 1,428 adult participants reported every other evening on their engagement in 10 climate-mitigating actions, including talking about climate change with other people. If participants reported having had at least one conversation in the last two days, we assessed whether or not they experienced three of the main facilitators identified in Study 2 during their conversations (increased motivation to take mitigating climate change action, emotional closeness, and feeling listened to) and four barriers (unpleasantness, lack of shared perspective, dismissal, and co-rumination). We additionally measured how pleasant the conversations were, as well as participants’ goals and their perception of these same goals in their conversation partner. Finally, participants indicated whether they would like to talk again about climate change with their conversation partner. This design allowed us to capture how different conversation experiences in daily life influence willingness to talk more about climate change in the future as well as actual conversation frequency. 
+
+<br>
+
+Prepare data before running analyses.
+
+<br>
+
+```{r setup, include=FALSE,warning=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+```{r}
+# Clear global environment
+remove(list=ls())
+
+# Open libraries
+library("tidyverse")
+library("knitr")
+library("kableExtra")
+library("reactable")
+library("patchwork")
+library("bmlm")
+library("lme4")
+library("broom.mixed")
+library("ggforce")
+library("sjPlot")
+library("brms")
+library("purrr")
+library("marginaleffects")
+library("bayestestR")
+library("tidybayes")
+library("arm")
+library("modelbased")
+
+# Set global options for rstanarm and brms models
+options(mc.cores = parallel::detectCores())
+
+# Set global ggplot theme
+plot_aes = theme_minimal() +
+  theme(legend.text = element_text(size = 8),
+        text = element_text(size = 16),
+        axis.text = element_text(color = "black"),
+        axis.ticks.y = element_blank(),
+        legend.position = "top",
+        plot.title = element_text(hjust = 0.5), 
+        plot.title.position = "plot",
+        panel.spacing.x = unit(1.5, "lines"), 
+        strip.text = element_text(size = 12),
+        plot.margin = margin(t = 5, r = 5, b = 5, l = 5))
+
+# Define colors
+palette <- c("#67C5CA",  "#F18448", "#3B506E", "#7B2952",
+             "#FFDD87","#00577C", "#262D63", "#21A48F",
+             "#E0C831", "#1E2834", "#8FC25D", "#E52420") 
+
+# Define folder filedir
+filedir <- "~/Dropbox/Psychology_Projects/Climate Change Conversations"
+
+# Open datasets
+d <- read_csv(sprintf("%s/Data/BB-Prime Longitudinal/study3_data_convo_experiences.csv", filedir))
+d_goal <- read.csv(sprintf("%s/Data/BB-Prime Longitudinal/study3_data_goals.csv", filedir)) %>% 
+  dplyr::mutate(goal_match = factor(goal_match, 
+                                          levels = c("both_0", "self_1", "partner_1", "both_1")),
+                goal_match_prev = factor(goal_match_prev, 
+                                          levels = c("both_0", "self_1", "partner_1", "both_1")))
+
+# Create a function to extract posterior means, posterior standard deviations, 95% credible intervals,
+# and probabilities of direction (pd) from Bayesian regression models
+extract_brms_results <- function(model, model_label, predictor_labels) {
+  
+  # Extract posterior summary: mean, SD, and 95% credible interval
+  results <- posterior_summary(model,
+                               pars = "^b_",
+                               probs = c(.025, .975))
+  
+  # Extract posterior draws
+  draws <- as_draws_matrix(model)
+  
+  # Calculate probability of direction (pd)
+  pd <- sapply(rownames(results), function(x) {
+    d <- draws[, x]
+    if (median(d) >= 0) {
+      mean(d > 0)} 
+    else {
+      mean(d < 0) }})
+  
+ # Remove "b_" prefix before matching predictor labels
+  predictor_names <- sub("^b_", "", rownames(results))
+  
+  # Combine results
+  data.frame(Model = model_label,
+             Predictor = unname(predictor_labels[predictor_names]),
+             `Posterior Mean` = results[, "Estimate"],
+             `Posterior SD` = results[, "Est.Error"],
+             Lower = results[, "Q2.5"],
+             Upper = results[, "Q97.5"],
+             PD = pd,
+             check.names = FALSE)
+}
+
+# Create a function to obtain posterior predicted probabilities
+predicted_values <- function(var, model) {
+  
+  # Create prediction data at the mean/reference values
+  nd <- marginaleffects::datagrid(model = model)
+  
+  # Duplicate the first row so the predictors of interest can take two values
+  nd <- dplyr::slice(nd, rep(1, 2))
+  
+  # We want to comapare predicted values of y for x = -0.5 vs. x = +0.5
+  nd[[var]] <- c(-0.5, 0.5)
+  
+  # Obtain posterior expected probabilities
+  posterior_epred(model,
+                  newdata = nd,
+                  re_formula = NA) %>%
+    apply(2, quantile, probs = c(.025, .50, .975)) %>%
+    t() %>%
+    as.data.frame() %>%
+    dplyr::mutate(value = c("No", "Yes"),
+                  .before = 1) %>%
+    dplyr::rename(lower = `2.5%`, prob = `50%`,  upper = `97.5%`)
+}
+
+# Create a function to calculate probabilities of direction
+compute_pd <- function(model) {
+
+  posterior::as_draws_df(model) %>%
+    dplyr::select(dplyr::starts_with("b_")) %>%
+    tidyr::pivot_longer(cols = everything(),
+                        names_to = "var_name",
+                        values_to = "draw") %>%
+    dplyr::mutate(var_name = sub("^b_", "", var_name)) %>%
+    dplyr::group_by(var_name) %>%
+    dplyr::summarise(PD = max(mean(draw > 0), mean(draw < 0)),
+                     .groups = "drop") %>%
+    dplyr::mutate(high_pd = PD >= .975)
+}
+
+
+# Function to create prediction data for a model
+prediction_data <- function(model, model_name, pred_var) {
+  
+  # Predicted probabilities
+  predictions <- purrr::map_dfr(pred_var$var_name,
+                                ~predicted_values(.x, model),
+                                .id = "predictor_id") %>%
+    dplyr::mutate(var_name = pred_var$var_name[as.integer(predictor_id)],
+                  group_label = pred_var$group_label[as.integer(predictor_id)],
+                  level_type = pred_var$level_type[as.integer(predictor_id)],
+                  model = model_name) %>%
+    dplyr::select(-predictor_id)
+  
+  # Probabilities of direction
+  pd <- compute_pd(model)
+  
+  # Combine predictions and PDs
+  predictions %>%
+    dplyr::left_join(pd, by = "var_name")
+}
+```
+
+# Conversation Experiences {.tabset}
+
+<br>
+
+Research Question: **How do conversation experiences in daily life relate to intention to talk more about climate change in the future and frequency of climate change conversations?**
+
+<br>
+
+## Conversation Intention {.unnumbered}
+
+<br>
+
+Because the study included repeated measures within individuals, we used the `isolate()` function from the “bmlm” package to separate all variables that varied both between- and within-individuals into their respective subcomponents before including them in the model. This approach allowed us to disentangle time-varying within-person effects from stable between-individual differences.
+
+We first examined how the presence of facilitators (motivated, close, listened to) and barriers (unpleasantness, lack of shared perspective, dismissal, and co-rumination) during conversations related to the likelihood of wanting to talk again. We tested these associations using a Bayesian multilevel logistic regression model with the default weakly informative priors. Both the within and between components of the predictors were included in the model and intercepts were allowed to vary across people. We also held constant several possible confounds: session number (1-5), baseline frequency of climate change conversations, age, gender, education, household income, and intervention group. The control arm (no intervention) was the group of reference. 
+
+<br>
+
+```{r}
+# m1 <- brm(convo_outcome_future_talk_more ~ convo_outcome_motivated_cw  +
+#             convo_outcome_closer_cw +
+#             convo_outcome_partner_response_listen_cw  +
+#             convo_pleasant_cw +
+#             convo_outcome_shared_reality_cw +
+#             convo_outcome_partner_response_disintered_cw +
+#             convo_outcome_partner_response_coruminate_cw +
+#             convo_outcome_motivated_cb +
+#             convo_outcome_closer_cb +
+#             convo_outcome_partner_response_listen_cb +
+#             convo_pleasant_cb +
+#             convo_outcome_shared_reality_cb +
+#             convo_outcome_partner_response_disintered_cb +
+#             convo_outcome_partner_response_coruminate_cb +
+#             action_current_c + age_c + gender_c + ses_degree_c +
+#             ses_income_household_c + politics_ideology_c +
+#             session_c + group + (1 | SID),
+#             family = bernoulli(link = "logit"),  data = d, seed = 123)
+```
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# # Save model results locally or upload if previously ran
+# save(m1, file = sprintf("%s/Model Results/study3_convo_intention_facilitators_barriers.RData", filedir))
+
+load(sprintf("%s/Model Results/study3_convo_intention_facilitators_barriers.RData", filedir))
+```
+
+<br>
+
+Create a table of results, including posterior means, posterior standard deviations, 95% credible intervals, and probabilities of direction (pd).
+
+<br>
+
+```{r}
+# Clean predictors' labels
+m1_labels <- c("Intercept" = "Intercept",
+  "convo_outcome_motivated_cw" = "Motivated (w/in)",
+  "convo_outcome_closer_cw" = "Close (w/in)",
+  "convo_outcome_partner_response_listen_cw" = "Listened (w/in)",
+  "convo_pleasant_cw" = "Pleasant (w/in)",
+  "convo_outcome_shared_reality_cw" = "Shared-Persp (w/in)",
+  "convo_outcome_partner_response_disintered_cw" = "Dismissed (w/in)",
+  "convo_outcome_partner_response_coruminate_cw" = "Co-Ruminated (w/in)",
+  "convo_outcome_motivated_cb" = "Motivated (btw)",
+  "convo_outcome_closer_cb" = "Close (btw)",
+  "convo_outcome_partner_response_listen_cb" = "Listened (btw)",
+  "convo_pleasant_cb" =  "Pleasant (btw)",
+  "convo_outcome_shared_reality_cb" = "Shared-Persp (btw)",
+  "convo_outcome_partner_response_disintered_cb" = "Dismissed (btw)",
+  "convo_outcome_partner_response_coruminate_cb" = "Co-Ruminated (btw)",
+  "action_current_c" = "Baseline Convo Freq",
+  "age_c" = "Age",
+  "gender_c" = "Gender",
+  "ses_degree_c" = "Education",
+  "ses_income_household_c" =  "HH Income",
+  "politics_ideology_c" = "Political Orientation",
+  "session_c" = "Time Point",
+  "groupES_prevention_self" = "Intervention 1",
+  "groupMCII_collective" = "Intervention 2",
+  "groupSTPB" = "Intervention 3")
+
+# Extract posterior means, posterior standard deviations, 95% credible intervals, 
+# and probabilities of direction (pd) from the model
+m1_results <- extract_brms_results(model = m1,
+                                   model_label = "Conversation intention",
+                                   predictor_labels = m1_labels)
+
+# Create results table
+intention_table <- m1_results %>%
+  dplyr::mutate(`Posterior Mean` = sprintf("%.2f", `Posterior Mean`),
+                `Posterior SD` = sprintf("%.2f", `Posterior SD`),
+                `95% CI` = sprintf("[%.2f, %.2f]", Lower, Upper),
+                PD = sprintf("%.3f", PD))  %>%
+  dplyr::select(Predictor, `Posterior Mean`, `Posterior SD`, `95% CI`, PD)
+
+# Kable table
+kable_output <- kable(intention_table,
+      format = "html",
+      row.names = FALSE,
+      col.names = c("Predictor", "Posterior Mean", "Posterior SD", "95% CI", "PD"),
+      align = c("l", "c", "c", "c", "c")) %>%
+  kable_styling(bootstrap_options = "striped",
+                full_width = FALSE,
+                font_size = 12) %>%
+  row_spec(0, bold = TRUE)
+
+#  Save as a PDF file
+save_kable(kable_output, sprintf("%s/Tables/study3_convo_experiences_intention.pdf", filedir))
+
+#  See results.
+kable_output
+```
+
+<br>
+
+Create a figure showing the predicted probability of wanting to talk more when different conversation experiences were present or not.
+
+<br>
+
+```{r}
+# Select predictors to plot
+pred_var <- tibble::tribble(~var_name, ~group_label, ~level_type,
+                             
+                             # Within-person predictors
+                             "convo_outcome_motivated_cw", "Motivated", "Within-person",
+                             "convo_outcome_closer_cw", "Close", "Within-person",
+                             "convo_outcome_partner_response_listen_cw", "Listened", "Within-person",
+                             "convo_pleasant_cw", "Pleasant", "Within-person",
+                             "convo_outcome_shared_reality_cw", "Shared-Persp", "Within-person",
+                             "convo_outcome_partner_response_disintered_cw", "Dismissed", "Within-person",
+                             "convo_outcome_partner_response_coruminate_cw", "Co-Ruminated", "Within-person",
+                             
+                             # Between-person predictors
+                             "convo_outcome_motivated_cb", "Motivated", "Between-person",
+                             "convo_outcome_closer_cb", "Close", "Between-person",
+                             "convo_outcome_partner_response_listen_cb", "Listened", "Between-person",
+                             "convo_pleasant_cb", "Pleasant", "Between-person",
+                             "convo_outcome_shared_reality_cb", "Shared-Persp", "Between-person",
+                             "convo_outcome_partner_response_disintered_cb", "Dismissed", "Between-person",
+                             "convo_outcome_partner_response_coruminate_cb", "Co-Ruminated", "Between-person")
+
+# Create prediction data
+pred_val_final <- prediction_data(m1, "Conversation Intention", pred_var) %>%
+  dplyr::mutate(group_label = factor(group_label,
+                         levels = rev(unique(pred_var$group_label))),
+                level_type = factor(level_type, 
+                                    levels = c("Within-person", "Between-person")),
+                value = factor(value, 
+                               levels = c("No", "Yes")))
+
+# Create figure
+p_intention <- ggplot(pred_val_final, aes(x = prob, y = group_label, 
+                                  color = value, shape = value)) +
+  geom_pointrange(aes(xmin = lower, xmax = upper, alpha = high_pd),
+                  position = position_dodge(width = .4),
+                  linewidth = 1, size = 1) +
+  scale_color_manual(name = "Conversation Experience Present", 
+                     values = c("No" = palette[10], "Yes" = palette[11])) +
+  scale_shape_manual(name = "Conversation Experience Present",
+                     values = c("No" = 16, "Yes" = 17)) +
+  scale_alpha_manual(values = c( "TRUE" = 1, "FALSE" = .25),
+                     guide = "none") +
+  labs(x = "Predicted Probability of Wanting to Talk Again",
+       y = "Conversation Experience") +
+  facet_grid(level_type ~ ., scales = "free_y", space = "free_y") +
+  guides(color = guide_legend(title = "Conversation Experience Present"),
+         shape = guide_legend(title = "Conversation Experience Present")) +
+  scale_x_continuous(limits = c(0.1, 0.7), breaks = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7)) +
+  plot_aes
+
+# Save figure
+{ragg::agg_tiff(sprintf("%s/Figures/study3_convo_experiences_intention.tiff", filedir), 
+               width = 1800, height = 1500, 
+               units = "px", res = 300)
+  print(p_intention)
+  invisible(dev.off())}
+
+# See figure
+p_intention
+```
+
+## Conversation Likelihood {.unnumbered}
+
+<br>
+
+We fit two Bayesian multilevel logistic regression models to examine whether conversation experiences were associated with (1) the likelihood of reporting another conversation at the subsequent time point (within-person) and (2) the likelihood of reporting any conversation during the study period (between-person). The models were estimated separately to allow the between-person model to include all study observations, including participants' first conversations.  We allowed intercepts to vary across people. We also held constant several possible confounds: session number (1-5), baseline frequency of climate change conversations, age, gender, education, household income, and intervention group. The control arm (no intervention) was the group of reference. 
+
+
+<br>
+```{r}
+# # Run regression model testing longitudinal associations
+# m2 <- brm(conversation ~ convo_outcome_motivated_prev_cw +
+#             convo_outcome_closer_prev_cw +
+#             convo_outcome_partner_response_listen_prev_cw  +
+#             convo_pleasant_prev_cw +
+#             convo_outcome_shared_reality_prev_cw +
+#             convo_outcome_partner_response_disintered_prev_cw +
+#             convo_outcome_partner_response_coruminate_prev_cw +
+#             convo_outcome_motivated_cb +
+#             convo_outcome_closer_cb +
+#             convo_outcome_partner_response_listen_cb +
+#             convo_pleasant_cb +
+#             convo_outcome_shared_reality_cb +
+#             convo_outcome_partner_response_disintered_cb +
+#             convo_outcome_partner_response_coruminate_cb +
+#             action_current_c + age_c + gender_c + ses_degree_c +
+#             ses_income_household_c + politics_ideology_c +
+#             session_c + group + (1 | SID),
+#             family = bernoulli(link = "logit"), data = d, seed = 123)
+# 
+# # Run regression model to test associations with between-individual differences
+# # We need to run this model separately from the longitudinal one in order to be able to
+# # include and count the first conversation of the study as well
+# m2b <- brm(conversation ~ convo_outcome_motivated_cb +
+#             convo_outcome_closer_cb +
+#             convo_outcome_partner_response_listen_cb +
+#             convo_pleasant_cb +
+#             convo_outcome_shared_reality_cb +
+#             convo_outcome_partner_response_disintered_cb +
+#             convo_outcome_partner_response_coruminate_cb +
+#             action_current_c + age_c + gender_c + ses_degree_c +
+#             ses_income_household_c + politics_ideology_c +
+#             session_c + group + (1 | SID),
+#             family = bernoulli(link = "logit"), data = d, seed = 123)
+```
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# # Save model results locally or upload if previously ran
+# save(m2, file = sprintf("%s/Model Results/study3_convo_behavior_facilitators_barriers.RData", filedir))
+# save(m2b, file = sprintf("%s/Model Results/study3_convo_behavior_facilitators_barriers_btwn.RData", filedir))
+
+load(sprintf("%s/Model Results/study3_convo_behavior_facilitators_barriers.RData", filedir))
+load(sprintf("%s/Model Results/study3_convo_behavior_facilitators_barriers_btwn.RData", filedir))
+```
+
+<br>
+
+Create a table of results, including posterior means, posterior standard deviations, 95% credible intervals, and probabilities of direction (pd).
+
+<br>
+
+```{r}
+# Table showing results combined from two models:
+# m2  = within-person model
+# m2b = between-person model
+
+# Clean labels of predictors to be extracted from the within-person model
+m2_labels <- c("Intercept" = "Intercept",
+               "convo_outcome_motivated_prev_cw" = "Motivated (w/in)",
+               "convo_outcome_closer_prev_cw" = "Close (w/in)",
+               "convo_outcome_partner_response_listen_prev_cw" = "Listened (w/in)",
+               "convo_pleasant_prev_cw" = "Pleasant (w/in)",
+               "convo_outcome_shared_reality_prev_cw" = "Shared-Persp (w/in)",
+               "convo_outcome_partner_response_disintered_prev_cw" = "Dismissed (w/in)",
+               "convo_outcome_partner_response_coruminate_prev_cw" = "Co-Ruminated (w/in)",
+               "convo_outcome_motivated_cb" = "Motivated (btw)",
+               "convo_outcome_closer_cb" = "Close (btw)",
+               "convo_outcome_partner_response_listen_cb" = "Listened (btw)",
+               "convo_pleasant_cb" = "Pleasant (btw)",
+               "convo_outcome_shared_reality_cb" = "Shared-Persp (btw)",
+               "convo_outcome_partner_response_disintered_cb" = "Dismissed (btw)",
+               "convo_outcome_partner_response_coruminate_cb" = "Co-Ruminated (btw)",
+               "action_current_c" = "Baseline Convo Freq",
+               "age_c" = "Age",
+               "gender_c" = "Gender",
+               "ses_degree_c" = "Education",
+               "ses_income_household_c" =  "HH Income",
+               "politics_ideology_c" = "Political Orientation",
+               "session_c" = "Time Point",
+               "groupES_prevention_self" = "Intervention 1",
+               "groupMCII_collective" = "Intervention 2",
+               "groupSTPB" = "Intervention 3")
+
+
+# Clean labels of predictors to be extracted from the between-person model
+m2b_labels <- c("Intercept" = "Intercept",
+               "convo_outcome_motivated_cb" = "Motivated (btw)",
+               "convo_outcome_closer_cb" = "Close (btw)",
+               "convo_outcome_partner_response_listen_cb" = "Listened (btw)",
+               "convo_pleasant_cb" = "Pleasant (btw)",
+               "convo_outcome_shared_reality_cb" = "Shared-Persp (btw)",
+               "convo_outcome_partner_response_disintered_cb" = "Dismissed (btw)",
+               "convo_outcome_partner_response_coruminate_cb" = "Co-Ruminated (btw)",
+               "age_c" = "Age",
+               "gender_c" = "Gender",
+               "ses_degree_c" = "Education",
+               "ses_income_household_c" =  "HH Income",
+               "politics_ideology_c" = "Political Orientation",
+               "session_c" = "Time Point",
+               "groupES_prevention_self" = "Intervention 1",
+               "groupMCII_collective" = "Intervention 2",
+               "groupSTPB" = "Intervention 3")
+
+# Extract posterior means, posterior standard deviations, 95% credible intervals, 
+# and probabilities of direction (pd) from the models
+m2_results <- extract_brms_results(model = m2,
+                                   model_label = "Longitudinal within-person",
+                                   predictor_labels = m2_labels)
+
+m2b_results <- extract_brms_results(model = m2b,
+                                    model_label = "Between-person",
+                                    predictor_labels = m2b_labels)
+
+
+# Create a table of combined results
+combined_results <- bind_rows(m2_results,
+                              m2b_results) %>%
+  mutate(`Posterior Mean` = sprintf("%.2f", `Posterior Mean`),
+         `Posterior SD` = sprintf("%.2f", `Posterior SD`),
+         `95% CI` = sprintf("[%.2f, %.2f]", Lower, Upper),
+         PD = sprintf("%.3f", PD)) %>%
+  dplyr::select(Model, Predictor, `Posterior Mean`, `Posterior SD`, `95% CI`, PD)
+
+# Kable table
+kable_output <- kable(combined_results,
+                      format = "html",
+                      row.names = FALSE,
+                      col.names = c("Model", "Predictor", "Posterior Mean",
+                                    "Posterior SD", "95% CI", "PD"),
+                      align = c("l", "l", "c", "c", "c", "c")) %>%
+  kable_styling(bootstrap_options = "striped",
+                full_width = FALSE,
+                font_size = 12) %>%
+  row_spec(0, bold = TRUE)
+
+# Save table as PDF
+save_kable(kable_output, sprintf("%s/Tables/study3_conversation_experiences_freq.pdf",
+                                 filedir))
+
+# See table of results
+kable_output
+```
+
+<br>
+
+Create a figure showing the predicted probability of having a conversation when different conversation experiences were present or not.
+
+<br>
+
+```{r}
+# Select predictors to plot
+pred_var_within <- tibble::tribble(~var_name, ~group_label, ~level_type,
+                                   "convo_outcome_motivated_prev_cw", "Motivated", "Within-person", 
+                                   "convo_outcome_closer_prev_cw", "Close", "Within-person",
+                                   "convo_outcome_partner_response_listen_prev_cw", "Listened", "Within-person",
+                                   "convo_pleasant_prev_cw",  "Pleasant", "Within-person",
+                                   "convo_outcome_shared_reality_prev_cw", "Shared-Persp", "Within-person",
+                                   "convo_outcome_partner_response_disintered_prev_cw", "Dismissed", "Within-person",
+                                   "convo_outcome_partner_response_coruminate_prev_cw", "Co-Ruminated", "Within-person")
+
+pred_var_between <- tibble::tribble(~var_name, ~group_label, ~level_type,                             
+                                    "convo_outcome_motivated_cb", "Motivated", "Between-person",
+                                    "convo_outcome_closer_cb", "Close", "Between-person",
+                                    "convo_outcome_partner_response_listen_cb", "Listened", "Between-person",
+                                     "convo_pleasant_cb",  "Pleasant", "Between-person",
+                                    "convo_outcome_shared_reality_cb",  "Shared-Persp", "Between-person",
+                                    "convo_outcome_partner_response_disintered_cb", "Dismissed", "Between-person",
+                                    "convo_outcome_partner_response_coruminate_cb", "Co-Ruminated", "Between-person")
+
+
+# Create prediction data
+pred_within <- prediction_data(model = m2,
+                               model_name = "Within-person",
+                               pred_var = pred_var_within)
+
+
+pred_between <- prediction_data(model = m2b,
+                                model_name = "Between-person",
+                                pred_var = pred_var_between)
+
+
+# Combine the two prediction datasets
+pred_conversation <- dplyr::bind_rows(pred_within, pred_between) %>%
+  dplyr::mutate(group_label = factor(group_label,
+                                     levels = rev(c("Motivated", "Close", "Listened", 
+                                                    "Pleasant", "Shared-Persp", 
+                                                    "Dismissed", "Co-Ruminated"))),
+    level_type = factor(level_type, levels = c("Within-person", "Between-person")),
+    value = factor(value, levels = c("No", "Yes")))
+
+# Create figure
+p_conversation <- ggplot(pred_conversation,
+  aes(x = prob, y = group_label, color = value, shape = value)) +
+  geom_pointrange(aes(xmin = lower, xmax = upper, alpha = high_pd),
+                  position = position_dodge(width = .4),
+                  linewidth = 1,
+                  size = 1) +
+  scale_color_manual(name = "Conversation Experience Present", 
+                     values = c("No" = palette[10], "Yes" = palette[11])) +
+  scale_shape_manual(name = "Conversation Experience Present", 
+                     values = c("No" = 16, "Yes" = 17)) +
+  scale_alpha_manual(values = c("TRUE" = 1, "FALSE" = .25),
+                     guide = "none") +
+  labs(x = "Predicted Probability of Reporting a Conversation",
+       y = "Conversation Experience") +
+  facet_grid(level_type ~ ., scales = "free_y", space = "free_y") +
+  guides(color = guide_legend(title = "Conversation Experience Present"),
+         shape = guide_legend(title = "Conversation Experience Present")) +
+  scale_x_continuous(limits = c(0.6, 1), breaks = c(0.6, 0.7, 0.8, 0.9, 1)) +
+  plot_aes
+
+# Save figure
+{ragg::agg_tiff(sprintf("%s/Figures/study3_convo_experiences_freq.tiff", filedir), 
+               width = 1800, height = 1500, 
+               units = "px", res = 300)
+  print(p_intention)
+  invisible(dev.off())}
+
+
+# See figure
+p_conversation
+```
+
+## Figure 5 {.unnumbered}
+
+<br>
+
+See below the script used to generate Figure 5 in the main manuscript. 
+
+<br>
+
+```{r}
+p_intention_final <- p_intention +
+  labs(title = "Likelihood of wanting to talk more")
+
+p_conversation_final <- p_conversation + 
+  labs(title = "Likelihood of having more conversations") +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank())
+
+tiff(sprintf("%s/Figures/Figure 5. Study 3 Results Experiences.tiff", filedir),
+     width = 14, height = 8, units = "in", res = 300, compression = "lzw")
+
+wrap_plots(p_intention_final, p_conversation_final) +
+  plot_layout(axis_titles = "collect", guides = "collect", ncol = 2) +
+  plot_annotation(tag_levels = 'A', tag_suffix = '.') & 
+  theme(plot.tag = element_text(size = 20, face = "bold"),
+        text = element_text(size = 18),
+        plot.title = element_text(size = 19,
+                                  hjust = 0.5, margin = margin(b = 15)),
+        strip.text.y = element_text(size = 14),
+        legend.position = "bottom",
+        legend.title = element_text(size = 14),
+        legend.text = element_text(size = 13),
+        legend.key.size = grid::unit(0.8, "cm"),
+        legend.spacing.x = grid::unit(0.4, "cm"),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        strip.background = element_rect(fill = "grey98",
+                                        colour = "grey92",
+                                        linewidth = 1),
+        panel.spacing.y = grid::unit(1.5, "lines"),
+        panel.border = element_rect(colour = "grey95", 
+                                    fill = NA, linewidth = 1))
+
+invisible(dev.off())
+```
+
+# Conversation Goals {.tabset}
+
+<br>
+
+Research Question: **How does goal alignment in conversations relate to intention to talk more about climate change in the future and frequency of climate change conversations?**
+
+<br>
+
+## Conversation Intention {.unnumbered}
+
+<br>
+
+We ran a Bayesian multilevel logistic regression model testing whether goal alignment during conversations predicts the likelihood of wanting to talk again with the conversation partner in the future. Goal alignment is represented by a factor variable called `goal_match` with four levels: neither person has the goal (both_0), only the partner has the goal (partner_1), only the participant has the goal (self_1), or both the participant and partner have the goal (both_1). The model includes as control variables: baseline conversation frequency, age, gender, education, household income, political orientation, time point, and intervention group. We allowed intercepts to vary across people to account for the nesting of repeated observations within participants. We also included random slopes for goal alignment for different types of goals (8 total: empower self, empower other, learn self, help other learn, connect, make a positive impression, feel less negative, make the other person feel less negative) to test whether the association between goal alignment and future conversation intention is specific to certain types of goals.
+
+We examined only within-person associations because it was difficult to define between-person differences in average goal match levels for a categorical variable comprising of 8 goals with 4 possible match levels.
+
+<br>
+
+```{r}
+# m3 <- brm(convo_outcome_future_talk_more ~ goal_match +
+#             action_current_c + age_c + gender_c + ses_degree_c +
+#             ses_income_household_c + politics_ideology_c +
+#             session_c + group + (1 | SID) + (goal_match | goal_type),
+#           family = bernoulli(link = "logit"),  data = d_goal,
+#           seed = 123, iter = 10000)
+```
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# # Save model results locally or upload if previously ran
+# save(m3, file = sprintf("%s/Model Results/study3_convo_intention_goals.RData", filedir))
+
+load(sprintf("%s/Model Results/study3_convo_intention_goals.RData", filedir))
+```
+
+<br>
+
+Create a table of results, including posterior means, posterior standard deviations, 95% credible intervals, and probabilities of direction (pd) for both fixed effects and goal-specific slopes.
+
+<br>
+
+```{r}
+# Labels for fixed effects
+m3_labels <- c("Intercept" = "Intercept",
+  "goal_matchself_1" = "Goal Alignment: Only Participant Has Goal",
+  "goal_matchpartner_1" = "Goal Alignment: Only Convo Partner Has Goal",
+  "goal_matchboth_1" = "Goal Alignment: Both Share Goal",
+  "action_current_c" = "Baseline Convo Freq",
+  "age_c" = "Age",
+  "gender_c" = "Gender",
+  "ses_degree_c" = "Education",
+  "ses_income_household_c" = "HH Income",
+  "politics_ideology_c" = "Political Orientation",
+  "session_c" = "Time Point",
+  "groupES_prevention_self" = "Intervention 1",
+  "groupMCII_collective" = "Intervention 2",
+  "groupSTPB" = "Intervention 3")
+
+
+# Extract fixed effects' posterior means, posterior standard deviations, 
+# 95% credible intervals, and probabilities of direction (pd) 
+m3_fixed_results <- extract_brms_results(model = m3, 
+                                         model_label = "Fixed",
+                                         predictor_labels = m3_labels) %>%
+  dplyr::rename(Effects = Model) %>%
+  dplyr::mutate(Predictor = factor(Predictor, levels = c("Intercept",
+                                                         "Goal Alignment: Only Participant Has Goal",
+                                                         "Goal Alignment: Only Convo Partner Has Goal",
+                                                         "Goal Alignment: Both Share Goal",
+                                                         "Baseline Convo Freq", "Age", "Gender",
+                                                         "Education", "HH Income", "Political Orientation",
+                                                         "Time Point", "Intervention 1", "Intervention 2",
+                                                         "Intervention 3")), 
+                `Posterior Mean` = sprintf("%.2f", `Posterior Mean`),
+                `Posterior SD` = sprintf("%.2f", `Posterior SD`),
+                `95% CI` = sprintf("[%.2f, %.2f]", Lower, Upper),
+                PD = sprintf("%.3f", PD)) %>%
+  dplyr::arrange(Predictor) %>%
+  dplyr::select(Effects, Predictor, `Posterior Mean`, `Posterior SD`, `95% CI`, PD) 
+
+# Extract goal-specific slopes' posterior means, posterior standard deviations, 
+# 95% credible intervals, and probabilities of direction (pd) 
+# Extract posterior draws for fixed effects + goal-type-specific random slopes
+m3_random_results <- posterior::as_draws_df(m3) %>%
+  dplyr::select(.draw, b_goal_matchpartner_1,
+                b_goal_matchself_1,
+                b_goal_matchboth_1,
+                dplyr::starts_with("r_goal_type[")) %>%
+  tidyr::pivot_longer(cols = dplyr::starts_with("r_goal_type["),
+                      names_to = "Term",
+                      values_to = "random_effect") %>%
+  dplyr::filter(!grepl("Intercept", Term)) %>%
+  dplyr::mutate(`Goal Type` = sub("^r_goal_type\\[([^,]+),.*$", "\\1", Term),
+                `Goal Alignment` = sub("^r_goal_type\\[[^,]+,(.*)\\]$", "\\1", Term)) %>%
+  dplyr::mutate(`Fixed Effect` = dplyr::case_when(`Goal Alignment` == "goal_matchpartner_1" ~ b_goal_matchpartner_1,
+                                                  `Goal Alignment` == "goal_matchself_1" ~ b_goal_matchself_1,
+                                                  `Goal Alignment` == "goal_matchboth_1" ~ b_goal_matchboth_1)) %>%
+  dplyr::mutate(`Goal-Specific Effect` = `Fixed Effect` + random_effect) %>%
+  dplyr::group_by(`Goal Type`, `Goal Alignment`) %>%
+  dplyr::summarise(`Posterior Mean` = mean(`Goal-Specific Effect`),
+                   `Posterior SD` = sd(`Goal-Specific Effect`),
+                   Lower = quantile(`Goal-Specific Effect`, .025),
+                   Upper = quantile(`Goal-Specific Effect`, .975),
+                   PD = max(mean(`Goal-Specific Effect` > 0), 
+                            mean(`Goal-Specific Effect` < 0)),
+                   .groups = "drop") %>%
+  dplyr::mutate(`Posterior Mean` = sprintf("%.2f", `Posterior Mean`),
+                `Posterior SD` = sprintf("%.2f", `Posterior SD`),
+                `95% CI` = sprintf("[%.2f, %.2f]", Lower, Upper),
+                PD = sprintf("%.3f", PD),
+                `Goal Type` = factor(dplyr::recode(`Goal Type`,
+                                                   "connect" = "Connect",
+                                                   "pos_impression" = "Positive Impression",
+                                                   "learn_participant" = "Learn (Self)",
+                                                   "learn_convo_partner" = "Learn (Other)",
+                                                   "empower_participant" = "Empower (Self)",
+                                                   "empower_convo_partner" = "Empower (Other)",
+                                                   "hedonic_participant" = "Hedonic (Self)",
+                                                   "hedonic_convo_partner" = "Hedonic (Other)"),
+                                     levels = c("Empower (Self)", "Empower (Other)",
+                                                "Learn (Self)", "Learn (Other)",
+                                                "Connect", "Positive Impression",
+                                                "Hedonic (Self)", "Hedonic (Other)")),
+                `Goal Alignment` = factor(dplyr::recode(`Goal Alignment`, 
+                                                        "goal_matchpartner_1" = "Only Convo Partner Has Goal",
+                                                        "goal_matchself_1" = "Only Participant Has Goal",
+                                                        "goal_matchboth_1" = "Both Share Goal"),
+                                          levels = c("Only Participant Has Goal", 
+                                                     "Only Convo Partner Has Goal",
+                                                     "Both Share Goal")),
+                Effects = "Goal-specific") %>%
+  dplyr::arrange(`Goal Type`, `Goal Alignment`) %>%
+  dplyr::select(Effects, `Goal Type`, `Goal Alignment`, `Posterior Mean`, 
+                `Posterior SD`, `95% CI`, PD)
+
+# Kable tables separately
+kable_fixed_results <- kable(m3_fixed_results,
+                             format = "html",
+                             row.names = FALSE,
+                             col.names = c("Effects", "Predictor", "Posterior Mean",
+                                           "Posterior SD", "95% CI", "PD"),
+                             align = c("l", "l", "c", "c", "c", "c")) %>%
+  kable_styling(bootstrap_options = "striped",
+                full_width = FALSE,
+                font_size = 12) %>%
+  row_spec(0, bold = TRUE)
+
+kable_random_results <- kable(m3_random_results,
+                             format = "html",
+                             row.names = FALSE,
+                             col.names = c("Effects", "Goal Type", "Goal Alignment" , 
+                                           "Posterior Mean", "Posterior SD", 
+                                           "95% CI", "PD"),
+                             align = c("l", "l", "l", "c", "c", "c", "c")) %>%
+  kable_styling(bootstrap_options = "striped",
+                full_width = FALSE,
+                font_size = 12) %>%
+  row_spec(0, bold = TRUE)
+
+# Save tables as PDFs
+save_kable(kable_fixed_results, sprintf("%s/Tables/study3_conversation_goal_alignment_intention_fixed.pdf",
+                                 filedir))
+
+save_kable(kable_random_results, sprintf("%s/Tables/study3_conversation_goal_alignment_intention_random.pdf",
+                                 filedir))
+
+# See table of results - fixed effects
+kable_fixed_results
+
+# See table of results - random slopes
+kable_random_results
+```
+
+<br>
+
+For each of the eight goals, we combined the fixed and random effects to estimate the posterior predicted probability of wanting to talk again when: neither person has the goal, only the conversation partner has the goal, only the participant has the goal, or both people share the goal. We then calculated the difference in probabilities between these different scenarios. The results are summarized below using posterior mean and 95% credible intervals.
+
+<br>
+
+```{r}
+# Extract posterior draws for fixed effects and random slopes
+draws <- posterior::as_draws_df(m3) %>% 
+  dplyr::select(.draw, b_Intercept, b_goal_matchpartner_1,
+                b_goal_matchself_1, b_goal_matchboth_1, 
+                dplyr::starts_with("r_goal_type[")) %>%
+  tidyr::pivot_longer(cols = dplyr::starts_with("r_goal_type["),
+                      names_to = "Term", values_to = "random_effect") %>%
+  dplyr::filter(!grepl("Intercept", Term)) %>%
+  dplyr::mutate(goal_type = sub("^r_goal_type\\[([^,]+),.*$", "\\1", Term),
+                goal_match = sub("^r_goal_type\\[[^,]+,(.*)\\]$", "\\1", Term)) %>%
+  dplyr::select(-Term) %>%
+  tidyr::pivot_wider(names_from = goal_match,
+                     values_from = random_effect,
+                     names_prefix = "r_") %>%
+  dplyr::mutate(b_partner1 = b_goal_matchpartner_1 + r_goal_matchpartner_1,
+                b_self1 = b_goal_matchself_1 + r_goal_matchself_1,
+                b_both1 = b_goal_matchboth_1 + r_goal_matchboth_1)
+
+# Predict future intention for each level of goal alignment
+pred <- draws %>%
+  dplyr::mutate(pred_y_both0 = plogis(b_Intercept),
+                pred_y_partner1 = plogis(b_Intercept + b_partner1),
+                pred_y_self1 = plogis(b_Intercept + b_self1),
+                pred_y_both1 = plogis(b_Intercept + b_both1),
+                
+                # Pairwise differences in predicted probability
+                pred_y_diff_both1 = pred_y_both1 - pred_y_both0,
+                pred_y_diff_partner1 = pred_y_partner1 - pred_y_both0,
+                pred_y_diff_self1 = pred_y_self1 - pred_y_both0,
+                pred_y_diff_both_self1 = pred_y_both1 - pred_y_self1,
+                pred_y_diff_both_partner1 = pred_y_both1 - pred_y_partner1)
+
+
+# Summarize predicted probabilities and pairwise differences
+summary_results <- pred %>%
+  tidyr::pivot_longer(cols = dplyr::starts_with("pred_y_"),
+                      names_to = "condition",
+                      values_to = "probability") %>%
+  dplyr::group_by(goal_type, condition) %>%
+  tidybayes::median_qi(probability, .width = 0.95) %>%
+  dplyr::mutate(across(c(probability, .lower, .upper), ~ round(.x, 4)),
+                       condition = dplyr::recode(condition,
+                                          "pred_y_both0" = "Both No",
+                                          "pred_y_partner1" = "Partner Only",
+                                          "pred_y_self1" = "Self Only",
+                                          "pred_y_both1" = "Both Yes",
+                                          "pred_y_diff_both1" = "Est Diff Both-None",
+                                          "pred_y_diff_partner1" = "Est Diff Convo Partner-None",
+                                          "pred_y_diff_self1" = "Est Diff Participant-None",
+                                          "pred_y_diff_both_self1" = "Est Diff Both-Participant",
+                                          "pred_y_diff_both_partner1" = "Est Diff Both-Convo Partner")) %>%
+  dplyr::select(goal_type, condition, probability, .lower, .upper) %>%
+  dplyr::mutate(goal_type = factor(dplyr::recode(goal_type, 
+                                                 "empower_participant" = "Empower (Self)",
+                                                 "empower_convo_partner" = "Empower (Other)",
+                                                 "learn_participant" = "Learn (Self)",
+                                                 "learn_convo_partner" = "Learn (Other)",
+                                                 "connect" = "Connect",
+                                                 "pos_impression" = "Positive Impression",
+                                                 "hedonic_participant" = "Hedonic (Self)",
+                                                 "hedonic_convo_partner" = "Hedonic (Other)"),
+                                   levels = c("Empower (Self)", "Empower (Other)",
+                                              "Learn (Self)", "Learn (Other)",
+                                              "Connect", "Positive Impression",
+                                              "Hedonic (Self)", "Hedonic (Other)")))  %>%
+  dplyr::arrange(goal_type)
+
+# Select only pairwise differences
+summary_diff <- summary_results %>%
+  filter(condition %in% c("Est Diff Both-None", 
+                          "Est Diff Convo Partner-None", 
+                          "Est Diff Participant-None",
+                          "Est Diff Both-Participant",
+                          "Est Diff Both-Convo Partner")) %>%
+  mutate(`Posterior Mean` = sprintf("%.2f", probability),
+                `95% CI` = sprintf("[%.2f, %.2f]", .lower, .upper)) %>%
+  rename(Goal = goal_type, `Estimated Difference` = condition)  %>%
+  dplyr::select(Goal, `Estimated Difference`, `Posterior Mean`, `95% CI`)
+  
+# Kable table
+kable_output <- kable(summary_diff,
+                      format = "html",
+                      row.names = FALSE,
+                      col.names = c("Goal", "Estimated Difference", 
+                                    "Posterior Mean", "95% CI"),
+                      align = c("l", "l", "c", "c")) %>%
+  kable_styling(bootstrap_options = "striped",
+                full_width = FALSE,
+                font_size = 12) %>%
+  row_spec(0, bold = TRUE)
+
+# Save table as PDF
+save_kable(kable_output, sprintf("%s/Tables/study3_goal_pairwise_differences.pdf",
+                                 filedir))
+
+# See table of results
+kable_output
+```
+
+<br>
+
+Finally, we plotted the predicted probability of wanting to talk again at the end of a conversation as a function of goal alignment. The predicted probability of wanting to talk again at the end of a conversation is presented on the y-axis as a function of whether or not a participant endorsed a given goal on the x-axis. The relationship between the two variables is estimated separately for when the conversation partner did not have the goal (black) and when it did (green). Points represent the estimated means of the posterior distributions and error bars indicate their 95% credible intervals. Panels show the results separately for each goal.
+
+<br>
+
+```{r}
+# Create variables for plotting goal alignment
+plot_data <- summary_results %>%
+  dplyr::filter(!grepl("^Est Diff", condition)) %>%
+  dplyr::mutate(participant_has_goal = dplyr::case_when(condition %in% c("Self Only", "Both Yes") ~ "Yes",
+                                                        TRUE ~ "No"),
+                partner_has_goal = dplyr::case_when(condition %in% c("Partner Only", "Both Yes") ~ "Yes",
+                                                    TRUE ~ "No"))
+
+# Plot predicted probabilities
+p_goal_align <- ggplot(plot_data, aes(x = participant_has_goal, y = probability, 
+                                          color = partner_has_goal, shape = partner_has_goal)) +
+  geom_pointrange(aes(ymin = .lower, ymax = .upper), size = 1.1, linewidth = 1.1,
+                  position = position_dodge(width = 0.5)) +
+  scale_color_manual(name = "Does the Conversation Partner Have the Goal?", 
+                     values = c("No" = palette[10], "Yes" = palette[11])) +
+  scale_shape_manual(name = "Does the Conversation Partner Have the Goal?",
+                     values = c("No" = 16, "Yes" = 17)) +
+  labs(x = "Does the Participant Have the Goal?",
+       y = "Predicted Probability of Wanting to Talk Again") +
+  facet_wrap(~goal_type, ncol = 4) +
+  scale_y_continuous(limits = c(0, 0.3), breaks = c(0,0.1, 0.2, 0.3)) +
+  plot_aes +
+  theme(panel.border = element_rect(color = "gray92", fill = NA, 
+                                    linewidth = 0.5),
+        legend.title = element_text(size = 13),
+        legend.text = element_text(size = 12),
+        legend.key.size = grid::unit(0.8, "cm"),
+        axis.title.y = element_text(size = 15, margin = margin(r = 15)),
+        axis.title.x = element_text(size = 15, margin = margin(t = 15)))
+
+# Save figure
+{ragg::agg_tiff(sprintf("%s/Figures/Figure 6. Study 3 Results Goals.tiff", filedir), 
+                 width = 10, height = 5,
+                units = "in", res = 600, compression = "lzw")
+  print(p_goal_align)
+  invisible(dev.off())}
+
+# See figure
+p_goal_align
+```
+
+## Conversation Likelihood {.unnumbered}
+
+<br>
+
+In a final analysis, we ran a Bayesian multilevel logistic regression model to see whether goal alignment during conversations predicts the likelihood of reporting a conversation at the next time point. Goal alignment is represented by a factor variable called `goal_match` with four levels: neither person has the goal (both_0), only the partner has the goal (partner_1), only the participant has the goal (self_1), or both the participant and partner have the goal (both_1). The model includes as control variables: baseline conversation frequency, age, gender, education, household income, political orientation, time point, and intervention group. We allowed intercepts to vary across people to account for the nesting of repeated observations within participants. We also included random slopes for goal alignment for different types of goals.
+
+We examined only within-person associations because it was difficult to define between-person differences in average goal match levels for a categorical variable comprising of 8 goals with 4 possible match levels.
+
+<br>
+
+```{r}
+# m4 <- brm(conversation ~ goal_match_prev +
+#            action_current_c + age_c + gender_c + ses_degree_c + 
+#            ses_income_household_c + politics_ideology_c + 
+#            session_c + group + (1 | SID) + 
+#            (goal_match_prev | goal_type),
+#            family = bernoulli(link = "logit"),  
+#          data = d_goal, seed = 123, iter = 10000)
+```
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# # Save model results locally or upload if previously ran
+# save(m4, file = sprintf("%s/Model Results/study3_convo_behavior_goals.RData", filedir))
+
+load(sprintf("%s/Model Results/study3_convo_behavior_goals.RData", filedir))
+```
+
+Create a table of results, including posterior means, posterior standard deviations, 95% credible intervals, and probabilities of direction (pd) for both fixed effects and random slopes for each goal type.
+
+<br>
+
+```{r}
+# Labels for fixed effects
+m4_labels <- c("Intercept" = "Intercept",
+               "goal_match_prevself_1" = "Goal Alignment: Only Participant Has Goal",
+               "goal_match_prevpartner_1" = "Goal Alignment: Only Convo Partner Has Goal",
+               "goal_match_prevboth_1" = "Goal Alignment: Both Share Goal",
+               "action_current_c" = "Baseline Convo Freq",
+               "age_c" = "Age",
+               "gender_c" = "Gender",
+               "ses_degree_c" = "Education",
+               "ses_income_household_c" = "HH Income",
+               "politics_ideology_c" = "Political Orientation",
+               "session_c" = "Time Point",
+               "groupES_prevention_self" = "Intervention 1",
+               "groupMCII_collective" = "Intervention 2",
+               "groupSTPB" = "Intervention 3")
+
+
+# Extract fixed effects' posterior means, posterior standard deviations, 
+# 95% credible intervals, and probabilities of direction (pd) 
+m4_fixed_results <- extract_brms_results(model = m4, 
+                                         model_label = "Fixed",
+                                         predictor_labels = m4_labels) %>%
+  dplyr::rename(Effects = Model) %>%
+  dplyr::mutate(Predictor = factor(Predictor, levels = c("Intercept",
+                                                         "Goal Alignment: Only Participant Has Goal",
+                                                         "Goal Alignment: Only Convo Partner Has Goal",
+                                                         "Goal Alignment: Both Share Goal",
+                                                         "Baseline Convo Freq", "Age", "Gender",
+                                                         "Education", "HH Income", "Political Orientation",
+                                                         "Time Point", "Intervention 1", "Intervention 2",
+                                                         "Intervention 3")), 
+                `Posterior Mean` = sprintf("%.2f", `Posterior Mean`),
+                `Posterior SD` = sprintf("%.2f", `Posterior SD`),
+                `95% CI` = sprintf("[%.2f, %.2f]", Lower, Upper),
+                PD = sprintf("%.3f", PD)) %>%
+  dplyr::arrange(Predictor) %>%
+  dplyr::select(Effects, Predictor, `Posterior Mean`, `Posterior SD`, `95% CI`, PD) 
+
+# Extract random slopes' posterior means, posterior standard deviations, 
+# 95% credible intervals, and probabilities of direction (pd) 
+# Extract posterior draws for fixed effects + goal-type-specific random slopes
+m4_random_results <- posterior::as_draws_df(m4) %>%
+  dplyr::select(.draw, b_goal_match_prevpartner_1,
+                b_goal_match_prevself_1,
+                b_goal_match_prevboth_1,
+                dplyr::starts_with("r_goal_type[")) %>%
+  tidyr::pivot_longer(cols = dplyr::starts_with("r_goal_type["),
+                      names_to = "Term",
+                      values_to = "random_effect") %>%
+  dplyr::filter(!grepl("Intercept", Term)) %>%
+  dplyr::mutate(`Goal Type` = sub("^r_goal_type\\[([^,]+),.*$", "\\1", Term),
+                `Goal Alignment` = sub("^r_goal_type\\[[^,]+,(.*)\\]$", "\\1", Term)) %>%
+  dplyr::mutate(`Fixed Effect` = dplyr::case_when(`Goal Alignment` == "goal_match_prevpartner_1" ~ b_goal_match_prevpartner_1,
+                                                  `Goal Alignment` == "goal_match_prevself_1" ~ b_goal_match_prevself_1,
+                                                  `Goal Alignment` == "goal_match_prevboth_1" ~ b_goal_match_prevboth_1)) %>%
+  dplyr::mutate(`Goal-Specific Effect` = `Fixed Effect` + random_effect) %>%
+  dplyr::group_by(`Goal Type`, `Goal Alignment`) %>%
+  dplyr::summarise(`Posterior Mean` = mean(`Goal-Specific Effect`),
+                   `Posterior SD` = sd(`Goal-Specific Effect`),
+                   Lower = quantile(`Goal-Specific Effect`, .025),
+                   Upper = quantile(`Goal-Specific Effect`, .975),
+                   PD = max(mean(`Goal-Specific Effect` > 0), 
+                            mean(`Goal-Specific Effect` < 0)),
+                   .groups = "drop") %>%
+  dplyr::mutate(`Posterior Mean` = sprintf("%.2f", `Posterior Mean`),
+                `Posterior SD` = sprintf("%.2f", `Posterior SD`),
+                `95% CI` = sprintf("[%.2f, %.2f]", Lower, Upper),
+                PD = sprintf("%.3f", PD),
+                `Goal Type` = factor(dplyr::recode(`Goal Type`,
+                                                   "connect" = "Connect",
+                                                   "pos_impression" = "Positive Impression",
+                                                   "learn_participant" = "Learn (Self)",
+                                                   "learn_convo_partner" = "Learn (Other)",
+                                                   "empower_participant" = "Empower (Self)",
+                                                   "empower_convo_partner" = "Empower (Other)",
+                                                   "hedonic_participant" = "Hedonic (Self)",
+                                                   "hedonic_convo_partner" = "Hedonic (Other)"),
+                                     levels = c("Empower (Self)", "Empower (Other)",
+                                                "Learn (Self)", "Learn (Other)",
+                                                "Connect", "Positive Impression",
+                                                "Hedonic (Self)", "Hedonic (Other)")),
+                `Goal Alignment` = factor(dplyr::recode(`Goal Alignment`, 
+                                                        "goal_match_prevpartner_1" = "Only Convo Partner Has Goal",
+                                                        "goal_match_prevself_1" = "Only Participant Has Goal",
+                                                        "goal_match_prevboth_1" = "Both Share Goal"),
+                                          levels = c("Only Participant Has Goal", 
+                                                     "Only Convo Partner Has Goal",
+                                                     "Both Share Goal")),
+                Effects = "Goal-specific") %>%
+  dplyr::arrange(`Goal Type`, `Goal Alignment`) %>%
+  dplyr::select(Effects, `Goal Type`, `Goal Alignment`, `Posterior Mean`, 
+                `Posterior SD`, `95% CI`, PD)
+
+# Kable tables separately
+kable_fixed_results <- kable(m4_fixed_results,
+                             format = "html",
+                             row.names = FALSE,
+                             col.names = c("Effects", "Predictor", "Posterior Mean",
+                                           "Posterior SD", "95% CI", "PD"),
+                             align = c("l", "l", "c", "c", "c", "c")) %>%
+  kable_styling(bootstrap_options = "striped",
+                full_width = FALSE,
+                font_size = 12) %>%
+  row_spec(0, bold = TRUE)
+
+kable_random_results <- kable(m4_random_results,
+                             format = "html",
+                             row.names = FALSE,
+                             col.names = c("Effects", "Goal Type", "Goal Alignment" , 
+                                           "Posterior Mean", "Posterior SD", 
+                                           "95% CI", "PD"),
+                             align = c("l", "l", "l", "c", "c", "c", "c")) %>%
+  kable_styling(bootstrap_options = "striped",
+                full_width = FALSE,
+                font_size = 12) %>%
+  row_spec(0, bold = TRUE)
+
+# Save tables as PDFs
+save_kable(kable_fixed_results, sprintf("%s/Tables/study3_conversation_goal_alignment_freq_fixed.pdf",
+                                 filedir))
+
+save_kable(kable_random_results, sprintf("%s/Tables/study3_conversation_goal_alignment_freq_random.pdf",
+                                 filedir))
+
+# See table of results - fixed effects
+kable_fixed_results
+
+# See table of results - random slopes
+kable_random_results
+```
+
+

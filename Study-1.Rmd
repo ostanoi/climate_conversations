@@ -1,0 +1,339 @@
+---
+title: "Climate Change Conversations Study 1"
+author: "Ovidia Stanoi"
+date: "08/24/2026"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    theme: united
+    highlight: tango
+    df_print: paged
+    toc_float: true
+    css: styles.css
+    tabset: true
+  pdf_document: default
+---
+
+<br>
+
+Study 1 (N = 2,804) investigated how beliefs about climate change conversations related to current conversation frequency and intention to talk more about climate change in the future using existing data from two large cross-sectional datasets 43. As part of this project, participants reported their current frequency of climate change conversations, their intention to talk more or less about climate change in the future, the perceived personal and environmental benefit of climate change conversations, how difficult or easy they think it would be to have more conversations, and how much they think the people who are important to them would approve or disapprove if they were to talk more. All variables were measured on a scale from 1 to 7 with higher scores indicating more frequent conversation, higher future intention, and more positive beliefs.
+
+<br>
+
+Research Question: **How do beliefs about climate change conversations relate to conversation frequency and intention?**
+
+<br>
+
+```{r setup, include = FALSE, warning = FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# Clear global environment
+remove(list=ls())
+
+# Open libraries
+library("tidyverse")
+library("brms")
+library("tidybayes")
+library("knitr")
+library("kableExtra")
+library("patchwork")
+
+# Set global options for rstanarm and brms models
+options(mc.cores = parallel::detectCores())
+
+# Set global ggplot theme
+plot_aes = theme_minimal() +
+  theme(legend.text = element_text(size = 8),
+        text = element_text(size = 16),
+        axis.text = element_text(color = "black"),
+        axis.ticks.y = element_blank(),
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5), 
+        plot.title.position = "plot",
+        panel.spacing.x = unit(1.5, "lines"), 
+        strip.text = element_text(size = 12),
+        plot.margin = margin(t = 5, r = 5, b = 5, l = 5),
+        axis.title.x = element_text(margin = margin(t = 10)))
+
+# Define path where data are stored
+filedir <- "~/Library/CloudStorage/Dropbox/Psychology_Projects/Climate Change Conversations"
+
+# Open dataset
+d <- read.csv(sprintf("%s/Data/Merged/study1_data.csv", filedir))
+```
+
+# Current Conversation Frequency {.tabset}
+
+<br>
+
+We ran a Bayesian linear regression model to investigate how  perceived  **personal benefit**, **environmental benefit** **conversation ease**, and **social approval** of conversations related to **current frequency of climate change conversations**. Predictors were centered around the mean and included in the same model simultaneously, so that the intercept represents the current conversation frequency of the typical participant in the sample. We also held constant several possible confounding variables which have been shown in the past to relate to climate change conversations frequency: age, gender, education, household income, and political orientation. Finally, we included as a control variable the intervention group to which participants belonged in the project with the control (no intervention) arm as the group of reference.
+
+<br>
+
+```{r, messages = F, warnings = F}
+# m <- brm(action_current_recoded ~ action_person_impact_c + action_env_impact_c +
+#            action_ease_c + action_approval_c +
+#            age_c + gender_c + ses_degree_c + ses_income_household_c +
+#            politics_ideology_c + group, data = d, seed = 123)
+```
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# # Save model results locally or upload if previously ran
+# save(m, file = sprintf("%s/Model Results/Study1_convo_freq.RData", filedir))
+
+load(sprintf("%s/Model Results/Study1_convo_freq.RData", filedir))
+```
+
+<br>
+
+Create a table of results, including posterior means, posterior standard deviations, 95% credible intervals, and probabilities of direction (pd).
+
+<br>
+
+```{r}
+# Extract summary of fixed effects (estimate, se, 95%CI)
+results <- posterior_summary(m,
+                             pars = "^b_",
+                             probs = c(.025, .975))
+
+# Extract posterior draws
+draws <- as_draws_matrix(m)
+
+# Calculate the probability of direction (pd)
+pd <- sapply(colnames(draws)[grepl("^b_", colnames(draws))], function(x) {
+  d <- draws[, x]
+  if (median(d) >= 0) mean(d > 0) else mean(d < 0)
+})
+
+# Create results table
+freq_table <- data.frame(Predictor = c("(Intercept)", "Personal Benefit", 
+                                  "Environmental Benefit", 
+                                  "Conversation Ease", "Social Approval", 
+                                  "Age", "Gender", "Education", "HH Income", 
+                                  "Political Orientation", "Intervention 1", 
+                                  "Intervention 2", "Intervention 3", 
+                                  "Intervention 4", "Intervention 5"),
+                              `Posterior Mean` = sprintf("%.2f", results[, "Estimate"]),
+                              `Posterior SD` = sprintf("%.2f", results[, "Est.Error"]),
+                              `95% CI` = sprintf("[%.2f, %.2f]", results[, "Q2.5"], 
+                                                 results[, "Q97.5"]),
+                              PD = sprintf("%.3f", pd),
+                              check.names = FALSE)
+
+# Kable table
+kable_output <- kable(freq_table,
+      format = "html",
+      col.names = c("Predictor", "Posterior Mean", "Posterior SD", "95% CI", "PD"),
+      align = c("l", "c", "c", "c", "c")) %>%
+  kable_styling(bootstrap_options = "striped",
+                full_width = FALSE,
+                font_size = 12) %>%
+  row_spec(0, bold = TRUE)
+
+#  Save as a PDF file
+save_kable(kable_output, sprintf("%s/Tables/study1_convo_freq.pdf", filedir))
+
+#  See results.
+kable_output
+```
+
+<br>
+
+Create a figure showing the beta estimates for all four beliefs together.
+
+<br>
+
+```{r, messages = F, warnings = F}
+# Extract effects from the model
+c <- data.frame(fixef(m)) %>%
+  mutate(var = rownames(.)) %>%
+  filter(var %in% c("action_env_impact_c", "action_person_impact_c", 
+                       "action_ease_c", "action_approval_c")) %>%
+  mutate(var = case_when(var == "action_env_impact_c" ~ "Environmental Benefit",
+                         var == "action_person_impact_c" ~  "Personal Benefit",
+                         var == "action_ease_c" ~ "Conversation Ease",
+                         var == "action_approval_c" ~ "Social Approval",
+                          TRUE ~ ""),
+         var = factor(var, levels = c("Social Approval",
+                                      "Environmental Benefit",
+                                      "Conversation Ease", 
+                                      "Personal Benefit")))
+
+# Plot results  
+p_freq <- ggplot(data = c, 
+       aes(x = Estimate, 
+           y = (var))) +
+  geom_vline(xintercept = 0, color = "red",
+             linewidth = 0.9, linetype = 2) + 
+  geom_pointrange(aes(xmin = `Q2.5`, 
+                      xmax = `Q97.5`), 
+                  size = 1.2, linewidth = .9) + 
+  scale_x_continuous(breaks = c(0, 0.10, 0.20, 0.30),
+                     limits = c(0, 0.30)) +
+  labs(x = "Posterior Means & 95% CIs of Estimated Effects", 
+       y = "Belief",
+       title = "Current Conversation Frequency") + 
+  plot_aes
+
+# Save plot
+{ragg::agg_tiff(sprintf("%s/Figures/study1_convo_freq.tiff", filedir), 
+               width = 1800, height = 1080, 
+               units = "px", res = 300)
+  print(p_freq)
+  invisible(dev.off())}
+
+# See plot
+p_freq
+```
+
+# Future Conversation Intention {.tabset} 
+
+<br>
+
+We ran a second Bayesian linear regression model to test how perceived **personal benefit**,  **environmental benefit**, **conversation ease**, and **social approval** of conversations related to the **intention to talk more about climate change in the future**. Predictors were again centered around the mean and included in the same model together with several possible confounding variables: age, gender, education, household income, political orientation, and intervention group. We additionally held constant current conversation frequency, so that the estimates represent how much more participants intend to talk about climate change in the future than they presently do.
+
+<br>
+
+```{r, messages = F, warnings = F}
+# m <- brm(action_intention ~ action_person_impact_c + action_env_impact_c +
+#            action_ease_c + action_approval_c + action_current_recoded_c + 
+#            age_c + gender_c + ses_degree_c + ses_income_household_c +
+#            politics_ideology_c + group + action_current_recoded_c, 
+#          data = d, seed = 123)
+```
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# # Save model results locally or upload if previously ran
+# save(m, file = sprintf("%s/Model Results/Study1_convo_intention.RData", filedir))
+
+load(sprintf("%s/Model Results/Study1_convo_intention.RData", filedir))
+```
+
+<br>
+
+Create a table of results, including posterior means, posterior standard deviations, 95% credible intervals, and probabilities of direction (pd).
+
+<br>
+
+```{r}
+# Extract summary of fixed effects (posterior mean, posterior standard deviation, 95% credible interval)
+results <- posterior_summary(m,
+                             pars = "^b_",
+                             probs = c(.025, .975))
+
+# Extract posterior draws
+draws <- as_draws_matrix(m)
+
+# Calculate the probability of direction (pd)
+pd <- sapply(colnames(draws)[grepl("^b_", colnames(draws))], function(x) {
+  d <- draws[, x]
+  if (median(d) >= 0) mean(d > 0) else mean(d < 0)
+})
+
+# Create results table
+intention_table <- data.frame(Predictor = c("(Intercept)", "Personal Benefit", 
+                                       "Environmental Benefit", "Conversation Ease", 
+                                       "Social Approval", "Current Conversation Frequency", 
+                                       "Age", "Gender", "Education", "HH Income", 
+                                       "Political Orientation", "Intervention 1", 
+                                       "Intervention 2", "Intervention 3", 
+                                       "Intervention 4", "Intervention 5"),
+                              `Posterior Mean` = sprintf("%.2f", results[, "Estimate"]),
+                              `Posterior SD` = sprintf("%.2f", results[, "Est.Error"]),
+                              `95% CI` = sprintf("[%.2f, %.2f]", results[, "Q2.5"], 
+                                                 results[, "Q97.5"]),
+                              PD = sprintf("%.3f", pd),
+                              check.names = FALSE)
+
+# Kable table
+kable_output <- kable(intention_table,
+      format = "html",
+      col.names = c("Predictor", "Posterior Mean", "Posterior SD", "95% CI", "PD"),
+      align = c("l", "c", "c", "c", "c")) %>%
+  kable_styling(bootstrap_options = "striped",
+                full_width = FALSE,
+                font_size = 12) %>%
+  row_spec(0, bold = TRUE)
+
+#  Save as a PDF file
+save_kable(kable_output, sprintf("%s/Tables/study1_convo_intention.pdf", filedir))
+
+#  See results.
+kable_output
+```
+
+<br>
+
+Create a figure showing the beta estimates for all four beliefs together.
+
+<br>
+
+```{r, messages = F, warnings = F}
+# Extract effects from the model
+c <- data.frame(fixef(m)) %>%
+  mutate(var = rownames(.)) %>%
+  filter(var %in% c("action_env_impact_c", "action_person_impact_c", 
+                       "action_ease_c", "action_approval_c")) %>%
+  mutate(var = case_when(var == "action_env_impact_c" ~ "Environmental Benefit",
+                         var == "action_person_impact_c" ~  "Personal Benefit",
+                         var == "action_ease_c" ~ "Conversation Ease",
+                         var == "action_approval_c" ~ "Social Approval",
+                          TRUE ~ ""),
+         var = factor(var, levels = c("Social Approval",
+                                      "Environmental Benefit",
+                                      "Conversation Ease", 
+                                      "Personal Benefit")))
+
+# Plot results 
+p_intention <- ggplot(data = c, 
+       aes(x = Estimate, 
+           y = (var))) +
+  geom_vline(xintercept = 0, color = "red",
+             linewidth = 0.9, linetype = 2) + 
+  geom_pointrange(aes(xmin = `Q2.5`, 
+                      xmax = `Q97.5`), 
+                  size = 1.2, linewidth = .9) + 
+  scale_x_continuous(breaks = c(0, 0.10, 0.20, 0.30),
+                     limits = c(0, 0.30)) +
+  labs(x = "Posterior Means & 95% CIs of Estimated Effects", 
+       y = "Belief",
+       title = "Future Conversation Intention") + 
+  plot_aes
+
+# Save plot
+{ragg::agg_tiff(sprintf("%s/Figures/study1_convo_intention.tiff", filedir), 
+               width = 1800, height = 1080, 
+               units = "px", res = 300)
+  print(p_intention)
+  invisible(dev.off())}
+
+# See plot
+p_intention
+```
+
+# Figure 2 {.tabset}
+
+<br>
+
+Below see the script used to generate Figure 2 in the main manuscript. 
+
+<br>
+```{r}
+tiff(sprintf("%s/Figures/Figure 2. Study 1 Results.tiff", filedir),
+     width = 12, height = 6, units = "in", res = 300, compression = "lzw")
+
+wrap_plots(p_freq, p_intention) +
+  plot_layout(axis_titles = "collect", ncol = 2) +
+  plot_annotation(tag_levels = 'A', tag_suffix = '.') & 
+  theme(plot.tag = element_text(size = 20, face = "bold"),
+        text = element_text(size = 18),
+        plot.title = element_text(size = 19,
+                                  hjust = 0.5, margin = margin(b = 15)))
+
+invisible(dev.off())
+```
+
